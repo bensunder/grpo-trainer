@@ -33,18 +33,18 @@ Linux x86_64 and checked with a dry-run install for that target.
 ## Quick start (GPU box)
 
 ```bash
-# 1. Build (or: python3.12 -m venv .venv && . .venv/bin/activate && pip install -r requirements.lock && pip install --no-deps -e .)
-docker build -t grpo-trainer .
+# One command: detects GPU -> picks profile, checks driver (CUDA 13) and disk, installs uv + Python 3.12
+# + the locked stack inside /workspace (or $HOME/grpo), verifies torch sees the GPU, runs preflight.
+bash scripts/install.sh            # add --check to only inspect the machine; re-running is safe
 
-# 2. Shell into the container with GPUs, persistent runs/ and HF cache
-docker run --rm -it --gpus all --ipc=host \
-  -v "$PWD/runs:/app/runs" -v "$HOME/.cache/huggingface:/cache/huggingface" \
-  --entrypoint bash grpo-trainer
+# Every new shell afterwards:
+source /workspace/grpo-activate.sh # (or $HOME/grpo/grpo-activate.sh)
 
-# 3. Inside the container: smoke test (~20-40 min on 24 GB), then the real run
-scripts/smoke.sh gpu24
-scripts/pipeline.sh gpu24
+bash scripts/smoke.sh $GRPO_PROFILE      # ~20-40 min end-to-end proof
+bash scripts/pipeline.sh $GRPO_PROFILE   # the real run
 ```
+
+Docker alternative: `docker build -t grpo-trainer .` (base image tag unverified; see below).
 
 ## Commands
 
