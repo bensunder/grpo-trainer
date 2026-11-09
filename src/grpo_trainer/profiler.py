@@ -1,0 +1,129 @@
+"""Difficulty profiler.
+
+GRPO's advantage is (r - mean_group) / std_group. A prompt the base model solves 0/K or K/K times
+yields std = 0 -> zero advantage -> zero gradient, but still costs a full rollout. Profiling once,
+offline, with the same sampling settings as training, and keeping only prompts in the learnable band
+removes that waste before any training step is paid for.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import logging
+from collections import Counter
+from pathlib import Path
+from typing import Any
+
+from .config import Config
+from .data import load_splits, profile_cache_dir, profiling_sample
+from .manifest import atomic_write_json
+from .rewards.registry import RewardContext, build_scorer
+from .tasks import Example, dataset_fingerprint, get_task
+
+log = logging.getLogger(__name__)
+
+
+def profile_key(cfg: Config, sample: list[Example]) -> str:
+    """Identity of a profile: anything that changes pass rates changes the key."""
+    task = get_task(cfg.task.name)
+    correctness = next(r for r in cfg.rewards if r.name == "correctness")
+    payload = {
+        "model": cfg.model.name_or_path,
+        "revision": cfg.model.revision,
+        "dtype": cfg.model.dtype,
+        "sample": dataset_fingerprint(sample),
+        "k": cfg.profiler.samples_per_prompt,
+        "temperature": cfg.grpo.temperature,
+        "top_p": cfg.grpo.top_p,
+        "max_new_tokens": cfg.grpo.max_completion_length,
+        "system_prompt": task.system_prompt(cfg.task.system_prompt),
+        "correctness": correctness.params,
+        "seed": cfg.run.seed,
+    }
+    return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()[:16]
+
+
+def profile_path_for(cfg: Config, sample: list[Example]) -> Path:
+    return profile_cache_dir(cfg) / f"{profile_key(cfg, sample)}.jsonl"
+
+
+def summarize(rates: dict[str, float], k: int, lo: float, hi: float) -> dict[str, Any]:
+    n = len(rates)
+    hist = Counter(round(r * k) for r in rates.values())
+    kept = sum(1 for r in rates.values() if lo < r < hi)
+    return {
+        "prompts": n,
+        "samples_per_prompt": k,
+        "always_solved": hist.get(k, 0),
+        "never_solved": hist.get(0, 0),
+        "kept": kept,
+        "kept_fraction": kept / n if n else 0.0,
+        "histogram_correct_of_k": {str(i): hist.get(i, 0) for i in range(k + 1)},
+        "mean_pass_rate": sum(rates.values()) / n if n else 0.0,
+    }
+
+
+def run_profile(cfg: Config, *, force: bool = False) -> Path:
+    from .sampling import generate, vllm_engine
+
+    splits = load_splits(cfg)
+    sample = profiling_sample(cfg, splits.train)
+    out = profile_path_for(cfg, sample)
+    if out.is_file() and not force:
+        log.info("profile cache hit: %s (use --force to recompute)", out)
+        return out
+
+    task = get_task(cfg.task.name)
+    system_prompt = task.system_prompt(cfg.task.system_prompt)
+    correctness_spec = next(r for r in cfg.rewards if r.name == "correctness")
+    scorer = build_scorer(correctness_spec, RewardContext(cfg.grpo.max_completion_length))
+    k = cfg.profiler.samples_per_prompt
+
+    log.info("profiling %d prompts x %d samples with %s", len(sample), k, cfg.model.name_or_path)
+    with vllm_engine(
+        cfg,
+        cfg.model.name_or_path,
+        gpu_memory_utilization=cfg.profiler.gpu_memory_utilization,
+        max_new_tokens=cfg.grpo.max_completion_length,
+    ) as llm:
+        results = generate(
+            llm,
+            [e.messages(system_prompt) for e in sample],
+            n=k,
+            temperature=cfg.grpo.temperature,
+            top_p=cfg.grpo.top_p,
+            max_new_tokens=cfg.grpo.max_completion_length,
+            seed=cfg.run.seed,
+        )
+
+    rates: dict[str, float] = {}
+    out.parent.mkdir(parents=True, exist_ok=True)
+    tmp = out.with_suffix(".jsonl.tmp")
+    with tmp.open("w", encoding="utf-8") as f:
+        for ex, samples in zip(sample, results, strict=True):
+            correct = sum(
+                scorer(s.text, completion_ids=s.token_ids, row={"ground_truth": ex.ground_truth}) >= 1.0
+                for s in samples
+            )
+            rate = correct / len(samples)
+            rates[ex.id] = rate
+            f.write(
+                json.dumps({"id": ex.id, "pass_rate": rate, "correct": correct, "k": len(samples)}) + "\n"
+            )
+    tmp.replace(out)
+
+    summary = summarize(rates, k, cfg.profiler.keep_min_pass_rate, cfg.profiler.keep_max_pass_rate)
+    atomic_write_json(
+        out.with_suffix(".summary.json"), {"key": out.stem, "model": cfg.model.name_or_path, **summary}
+    )
+    log.info(
+        "profile: %d prompts, always=%d never=%d kept=%d (%.0f%%) -> %s",
+        summary["prompts"],
+        summary["always_solved"],
+        summary["never_solved"],
+        summary["kept"],
+        100 * summary["kept_fraction"],
+        out,
+    )
+    return out

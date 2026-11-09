@@ -1,0 +1,90 @@
+# Base GRPO run. Hardware-specific values live in configs/profiles/*.yaml and override these.
+# Every key is validated (unknown keys are errors). Resolve and inspect with:
+#   grpo validate --config configs/base.yaml --profile gpu24 --print
+
+run:
+  name: gsm8k-qwen2.5-1.5b-grpo
+  output_root: runs
+  seed: 42
+
+model:
+  name_or_path: Qwen/Qwen2.5-1.5B-Instruct
+  revision: null          # pin a commit sha for fully reproducible runs
+  dtype: bfloat16
+  attn_implementation: sdpa
+
+adapter:
+  mode: lora              # none | lora | qlora
+  r: 32
+  alpha: 64
+  dropout: 0.0
+  target_modules: all-linear
+
+task:
+  name: gsm8k
+  train_split: train
+  eval_split: test
+  system_prompt: null     # null -> task default, which states the <think>/<answer> contract
+
+# Correctness dominates: the shaping weights must sum to less than correctness (enforced),
+# so a well-formatted wrong answer can never outscore a correct one.
+rewards:
+  - name: correctness
+    weight: 1.0
+  - name: format
+    weight: 0.2
+    params:
+      min_think_chars: 20
+      max_answer_chars: 64
+  - name: length
+    weight: 0.1
+    params:
+      soft_fraction: 0.75
+
+grpo:
+  num_generations: 8
+  max_completion_length: 768
+  temperature: 1.0
+  top_p: 1.0
+  learning_rate: 1.0e-5
+  lr_scheduler_type: constant_with_warmup
+  warmup_steps: 0.03      # <1 = ratio of total steps
+  max_grad_norm: 1.0
+  per_device_train_batch_size: 4
+  gradient_accumulation_steps: 8   # 4 x 8 x 1 GPU = 32 completions = 4 prompts x 8 per step
+  max_steps: 300
+  beta: 0.0               # no KL term -> no reference model in memory
+  epsilon: 0.2
+  loss_type: dapo
+  scale_rewards: group
+  mask_truncated_completions: true
+  gradient_checkpointing: true
+  logging_steps: 5
+  save_steps: 50
+  save_total_limit: 3
+  log_completions: true
+  num_completions_to_print: 2
+  report_to: [tensorboard]
+
+vllm:
+  enabled: true
+  mode: colocate
+  gpu_memory_utilization: 0.35
+  enable_sleep_mode: true
+
+profiler:
+  enabled: true
+  samples_per_prompt: 8   # match grpo.num_generations so pass rates mirror training groups
+  max_prompts: 2000
+  keep_min_pass_rate: 0.0 # exclusive: drop never-solved
+  keep_max_pass_rate: 1.0 # exclusive: drop always-solved
+  gpu_memory_utilization: 0.85
+
+eval:
+  limit: null             # null = full test split (1319)
+  pass_k: 4
+  pass_k_temperature: 0.7
+  gpu_memory_utilization: 0.85
+  gate:
+    min_accuracy_delta: 0.03
+    max_format_regression: 0.0

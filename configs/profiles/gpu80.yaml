@@ -1,0 +1,26 @@
+# One 80 GB GPU (A100/H100): LoRA on 7-8B, vLLM colocated.
+hardware:
+  profile: gpu80
+  num_processes: 1
+  min_vram_gb: 75
+  min_free_disk_gb: 80
+
+run:
+  name: gsm8k-qwen2.5-7b-grpo
+
+model:
+  name_or_path: Qwen/Qwen2.5-7B-Instruct
+
+adapter:
+  mode: lora
+  r: 64
+  alpha: 128
+
+grpo:
+  per_device_train_batch_size: 8
+  gradient_accumulation_steps: 4   # 32 completions = 4 prompts x 8
+
+vllm:
+  mode: colocate
+  gpu_memory_utilization: 0.3
+  enable_sleep_mode: true

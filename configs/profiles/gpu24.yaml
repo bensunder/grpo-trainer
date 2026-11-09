@@ -1,0 +1,16 @@
+# One 20-24 GB GPU (RTX 4000 Ada / L4 / 4090 / A10): LoRA on <=3B, vLLM colocated with sleep mode.
+# For 7B on this class, switch adapter.mode to qlora and drop per_device_train_batch_size to 2
+# (with gradient_accumulation_steps 16) -- tight, verify with `grpo preflight`.
+hardware:
+  profile: gpu24
+  num_processes: 1
+  min_vram_gb: 19.5
+  min_free_disk_gb: 40
+
+adapter:
+  mode: lora
+
+vllm:
+  mode: colocate
+  gpu_memory_utilization: 0.35
+  enable_sleep_mode: true

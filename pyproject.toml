@@ -1,0 +1,57 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "grpo-trainer"
+version = "0.1.0"
+description = "Production GRPO training harness on TRL: validated config, verifiable rewards, difficulty profiling, held-out eval gate."
+readme = "README.md"
+requires-python = ">=3.11,<3.14"
+# Lightweight core: config, rewards, tasks, CLI. Importable and testable on CPU without GPU stacks.
+dependencies = [
+    "pydantic==2.14.3",
+    "pyyaml==6.0.3",
+]
+
+[project.optional-dependencies]
+# Full training stack. Exact pins; the transitive closure is frozen in requirements.lock.
+# TRL 1.17.1 requires vllm>=0.22,<0.33. vllm 0.32.0 hard-pins torch==2.13.0 and transformers<5.20.
+train = [
+    "trl==1.17.1",
+    "vllm==0.32.0",
+    "torch==2.13.0",
+    "transformers==5.19.0",
+    "accelerate==1.15.0",
+    "datasets==5.1.0",
+    "peft==0.21.2",
+    "bitsandbytes==0.50.2",
+]
+# Multi-GPU full fine-tune (configs/profiles/multi.yaml). Source build; not in requirements.lock.
+multi = [
+    "deepspeed==0.19.9",
+]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.6",
+]
+
+[project.scripts]
+grpo = "grpo_trainer.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q --strict-markers"
+markers = [
+    "gpu: requires CUDA and the full training stack (skipped on CPU)",
+]
+
+[tool.ruff]
+line-length = 110
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "SIM"]
