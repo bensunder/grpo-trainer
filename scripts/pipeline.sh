@@ -16,7 +16,7 @@ echo "== profile"
 grpo profile "${COMMON[@]}"
 
 echo "== train"
-scripts/train.sh "$PROFILE" "$@"
+bash scripts/train.sh "$PROFILE" "$@"
 
 RUN_DIR="$(grpo validate "${COMMON[@]}" --print | python3 -c \
   'import json,sys; c=json.load(sys.stdin); print(c["run"]["output_root"] + "/" + c["run"]["name"])')"

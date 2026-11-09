@@ -24,7 +24,8 @@ preflight ──► profile ──► train ──► eval(base) + eval(trained)
 | peft / accelerate / datasets / bitsandbytes | 0.21.2 / 1.15.0 / 5.1.0 / 0.50.2 | |
 | tensorboard | 2.21.0 | default `report_to`; transformers raises at Trainer init without it |
 
-`requirements.lock` is the full 214-package closure, resolved for Python 3.12 / Linux x86_64.
+`requirements.lock` is the full 214-package closure, resolved with `uv pip compile` for Python 3.12 /
+Linux x86_64 and checked with a dry-run install for that target.
 `grpo preflight` refuses to run on any drift. Regenerate with `scripts/relock.sh`.
 
 **Host requirement:** an NVIDIA driver that supports CUDA 13 (`nvidia-smi` header shows `CUDA Version: 13.x`).

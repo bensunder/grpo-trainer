@@ -31,7 +31,7 @@ echo "== [1/6] preflight";  grpo preflight "${COMMON[@]}"
 echo "== [2/6] profile";    grpo profile "${COMMON[@]}"
 
 echo "== [3/6] train, interrupted with SIGTERM after first checkpoint"
-setsid scripts/train.sh "$PROFILE" "${SMOKE[@]}" &
+setsid bash scripts/train.sh "$PROFILE" "${SMOKE[@]}" &
 TRAIN_PID=$!
 for _ in $(seq 1 360); do
   if compgen -G "$RUN_DIR/checkpoints/checkpoint-*" > /dev/null; then break; fi
@@ -45,7 +45,7 @@ while pgrep -g "$TRAIN_PID" > /dev/null 2>&1; do sleep 2; done
 [ -f "$RUN_DIR/final/COMPLETE" ] && { echo "run completed before interrupt; resume not exercised"; }
 
 echo "== [4/6] resume to completion"
-scripts/train.sh "$PROFILE" "${SMOKE[@]}"
+bash scripts/train.sh "$PROFILE" "${SMOKE[@]}"
 [ -f "$RUN_DIR/final/COMPLETE" ] || { echo "FAIL: final/COMPLETE missing"; exit 1; }
 python3 -c 'import json,sys; m=json.load(open(sys.argv[1])); assert m.get("resumes"), "no resume recorded"; print("   resume recorded:", m["resumes"][-1])' "$RUN_DIR/manifest.json"
 
