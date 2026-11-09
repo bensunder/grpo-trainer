@@ -1,0 +1,19 @@
+# One 16 GB GPU (RTX A4000 / 4060 Ti 16GB / 5070 Ti): LoRA on <=1.5B, vLLM colocated with sleep mode.
+# Smaller micro-batch, same 32 completions per step (2 x 16 = 4 prompts x 8 generations).
+hardware:
+  profile: gpu16
+  num_processes: 1
+  min_vram_gb: 15
+  min_free_disk_gb: 25
+
+adapter:
+  mode: lora
+
+grpo:
+  per_device_train_batch_size: 2
+  gradient_accumulation_steps: 16
+
+vllm:
+  mode: colocate
+  gpu_memory_utilization: 0.3
+  enable_sleep_mode: true

@@ -3,10 +3,12 @@
 # Proves: preflight, profiling, training, checkpointing, SIGTERM -> graceful checkpoint -> resume,
 # adapter merge, eval, gate plumbing. It does NOT prove the model improves (20 steps is too few);
 # the gate is run with min_accuracy_delta=-1 so only the plumbing is asserted.
-#   scripts/smoke.sh [profile]   (default gpu24)
+#   scripts/smoke.sh [profile] [--set key=value ...]   (default gpu24)
+#   e.g. scripts/smoke.sh gpu16 --set vllm.gpu_memory_utilization=0.25
 set -euo pipefail
 
 PROFILE="${1:-gpu24}"
+shift || true
 CONFIG="${CONFIG:-configs/base.yaml}"
 SMOKE=(
   --set run.name=smoke-"$PROFILE"
@@ -18,6 +20,7 @@ SMOKE=(
   --set eval.pass_k=1
   --set eval.gate.min_accuracy_delta=-1.0
   --set eval.gate.max_format_regression=1.0
+  "$@"  # caller overrides win (applied last)
 )
 COMMON=(--config "$CONFIG" --profile "$PROFILE" "${SMOKE[@]}")
 RUN_DIR="runs/smoke-$PROFILE"

@@ -64,6 +64,7 @@ Exit codes: `2` config, `3` preflight, `4` data, `5` manifest mismatch, `6` gate
 | Profile | Default model | Mode | Notes |
 |---|---|---|---|
 | `gpu24` | Qwen2.5-1.5B-Instruct | LoRA + vLLM colocate, sleep mode | 7B possible with `adapter.mode=qlora`, batch 2 — tight |
+| `gpu16` | Qwen2.5-1.5B-Instruct | LoRA, micro-batch 2 x 16 accum, vLLM 0.3 | RTX A4000 / 16 GB cards; est. ~12 GiB |
 | `gpu80` | Qwen2.5-7B-Instruct | LoRA r=64 + vLLM colocate | |
 | `multi` | Qwen2.5-7B-Instruct | full fine-tune, ZeRO-3 on 3 GPUs, vLLM server on a 4th | needs `pip install '.[multi]'` (deepspeed) |
 
@@ -113,7 +114,7 @@ CUDA_VISIBLE_DEVICES=1,2,3 scripts/train.sh multi
 
 ## Verification status
 
-Verified in CPU runs (`pytest`, 192 tests):
+Verified in CPU runs (`pytest`, 194 tests):
 - Parsing, reward scoring and the TRL-facing wrapper; config validation and overrides; tasks,
   contamination removal, profiling selection; pass@k and gate; manifest/resume guards; memory estimates.
 - **Real TRL 1.17.1 `GRPOTrainer` end-to-end on CPU** with a randomly initialised tiny Qwen2 (vLLM off,

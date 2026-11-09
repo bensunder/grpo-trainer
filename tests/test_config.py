@@ -6,7 +6,7 @@ from grpo_trainer.errors import ConfigError
 from .conftest import CONFIGS
 
 
-@pytest.mark.parametrize("profile", ["gpu24", "gpu80", "multi", None])
+@pytest.mark.parametrize("profile", ["gpu24", "gpu16", "gpu80", "multi", None])
 def test_shipped_configs_validate(profile):
     cfg = load_config(CONFIGS / "base.yaml", profile)
     assert cfg.generation_batch_size % cfg.grpo.num_generations == 0
@@ -146,3 +146,12 @@ def test_fingerprint_changes_with_reward_weights(tmp_path):
 def test_config_is_immutable(base_config):
     with pytest.raises(Exception):  # noqa: B017 - pydantic frozen model raises ValidationError
         base_config.run.seed = 1  # type: ignore[misc]
+
+
+def test_gpu16_profile_fits_16gb_and_keeps_step_size():
+    from grpo_trainer.preflight import Status, check_memory
+
+    cfg = load_config(CONFIGS / "base.yaml", "gpu16")
+    assert cfg.prompts_per_step == 4 and cfg.generation_batch_size == 32
+    r = check_memory(cfg, num_params=1_543_714_304, vram_gb=16376 / 1024, vocab_size=151_936)
+    assert r.status is Status.OK, r.detail
