@@ -133,6 +133,7 @@ export UV_PYTHON_INSTALL_DIR="$ROOT/.uv-python"
 export UV_CACHE_DIR="$ROOT/.uv-cache"
 export HF_HOME="$HF_HOME"
 export GRPO_PROFILE="$PROFILE"
+export VLLM_USE_FLASHINFER_SAMPLER=0  # avoid FlashInfer JIT build; see grpo_trainer/cli.py
 . "$VENV/bin/activate"
 cd "$REPO"
 EOF

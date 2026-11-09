@@ -15,6 +15,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import sys
 from pathlib import Path
 
@@ -75,7 +76,21 @@ def _load(args: argparse.Namespace) -> Config:
     return load_config(args.config, args.profile, args.overrides)
 
 
+# Runtime defaults applied before vLLM is imported (child engine processes inherit os.environ).
+# FlashInfer's sampler JIT-compiles a CUDA kernel on first use with whatever nvcc it finds; on hosts
+# whose system CUDA differs from torch's (seen: RTX A4000 box, torch cu130, older /usr/local/cuda)
+# that build fails and vLLM's engine dies at startup. vLLM's native PyTorch sampler needs no compile.
+# setdefault: an explicit VLLM_USE_FLASHINFER_SAMPLER=1 in the environment still wins.
+RUNTIME_ENV_DEFAULTS = {"VLLM_USE_FLASHINFER_SAMPLER": "0"}
+
+
+def apply_runtime_env_defaults() -> None:
+    for key, value in RUNTIME_ENV_DEFAULTS.items():
+        os.environ.setdefault(key, value)
+
+
 def main(argv: list[str] | None = None) -> int:
+    apply_runtime_env_defaults()
     args = build_parser().parse_args(argv)
     setup_logging(args.log_level)
     try:

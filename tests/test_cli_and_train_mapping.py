@@ -112,3 +112,31 @@ def test_grpo_config_constructs(config_factory, tmp_path, profile):
     args = trl.GRPOConfig(**kw)
     assert args.generation_batch_size % args.num_generations == 0
     assert args.loss_type == "dapo"
+
+
+def test_flashinfer_sampler_disabled_by_default(monkeypatch):
+    import os
+
+    from grpo_trainer.cli import apply_runtime_env_defaults
+
+    monkeypatch.delenv("VLLM_USE_FLASHINFER_SAMPLER", raising=False)
+    apply_runtime_env_defaults()
+    assert os.environ["VLLM_USE_FLASHINFER_SAMPLER"] == "0"
+
+
+def test_flashinfer_sampler_explicit_override_wins(monkeypatch):
+    import os
+
+    from grpo_trainer.cli import apply_runtime_env_defaults
+
+    monkeypatch.setenv("VLLM_USE_FLASHINFER_SAMPLER", "1")
+    apply_runtime_env_defaults()
+    assert os.environ["VLLM_USE_FLASHINFER_SAMPLER"] == "1"
+
+
+def test_main_applies_runtime_defaults(monkeypatch):
+    import os
+
+    monkeypatch.delenv("VLLM_USE_FLASHINFER_SAMPLER", raising=False)
+    assert main(["validate", *BASE]) == 0
+    assert os.environ["VLLM_USE_FLASHINFER_SAMPLER"] == "0"

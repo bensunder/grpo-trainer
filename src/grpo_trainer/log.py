@@ -21,6 +21,6 @@ def setup_logging(level: str | int = "INFO") -> None:
     root.handlers[:] = [handler]
     # Non-zero ranks only surface warnings and above.
     root.setLevel(level if rank == 0 else logging.WARNING)
-    for noisy in ("httpx", "urllib3", "filelock", "fsspec"):
+    for noisy in ("httpx", "httpx2", "urllib3", "filelock", "fsspec", "huggingface_hub"):
         logging.getLogger(noisy).setLevel(logging.WARNING)
     root._grpo_configured = True  # type: ignore[attr-defined]
