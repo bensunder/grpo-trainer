@@ -16,6 +16,7 @@ from .config import Config
 from .data import eval_examples, load_splits
 from .manifest import atomic_write_json
 from .metrics import pass_at_k
+from .rewards.parsing import lenient_correct
 from .rewards.registry import RewardContext, build_scorer
 from .rewards.scorers import CorrectnessScorer, FormatScorer
 from .tasks import dataset_fingerprint, get_task
@@ -67,7 +68,7 @@ def run_eval(cfg: Config, model: str, label: str, out_dir: Path | None = None) -
     out_dir = out_dir or (cfg.run_dir / "eval")
     out_dir.mkdir(parents=True, exist_ok=True)
     per_example_path = out_dir / f"{label}.examples.jsonl"
-    n_correct = n_format = n_trunc = total_tokens = 0
+    n_correct = n_format = n_trunc = total_tokens = n_lenient = 0
     pass_k_sum = 0.0
     with per_example_path.open("w", encoding="utf-8") as f:
         for i, ex in enumerate(examples):
@@ -76,6 +77,8 @@ def run_eval(cfg: Config, model: str, label: str, out_dir: Path | None = None) -
             ok = correctness(g.text, completion_ids=g.token_ids, row=row) >= 1.0
             fm = fmt(g.text, completion_ids=g.token_ids, row=row) >= 1.0
             n_correct += ok
+            lenient = lenient_correct(g.text, ex.ground_truth)
+            n_lenient += lenient
             n_format += fm
             n_trunc += g.truncated
             total_tokens += len(g.token_ids)
@@ -83,6 +86,7 @@ def run_eval(cfg: Config, model: str, label: str, out_dir: Path | None = None) -
                 "id": ex.id,
                 "ground_truth": ex.ground_truth,
                 "correct": ok,
+                "lenient_correct": lenient,
                 "format": fm,
                 "truncated": g.truncated,
                 "tokens": len(g.token_ids),
@@ -108,6 +112,7 @@ def run_eval(cfg: Config, model: str, label: str, out_dir: Path | None = None) -
         "system_prompt_sha": hashlib.sha256(system_prompt.encode("utf-8")).hexdigest()[:16],
         "greedy": {
             "accuracy": n_correct / n,
+            "lenient_accuracy": n_lenient / n,
             "format_rate": n_format / n,
             "truncation_rate": n_trunc / n,
             "mean_tokens": total_tokens / n,

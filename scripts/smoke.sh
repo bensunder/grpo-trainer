@@ -19,6 +19,7 @@ SMOKE=(
   --set eval.limit=100
   --set eval.pass_k=1
   --set eval.gate.min_accuracy_delta=-1.0
+  --set eval.gate.min_lenient_accuracy_delta=-1.0
   --set eval.gate.max_format_regression=1.0
   "$@"  # caller overrides win (applied last)
 )

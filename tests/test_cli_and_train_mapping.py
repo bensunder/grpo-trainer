@@ -45,6 +45,14 @@ def _write_reports(run_dir, base_acc, trained_acc):
         (eval_dir / f"{label}.json").write_text(
             json.dumps({**common, "greedy": {"accuracy": acc, "format_rate": 1.0}})
         )
+        n_right = round(acc * 10)
+        lines = [
+            json.dumps(
+                {"id": f"q{i}", "ground_truth": "5", "output": "<answer>5</answer>" if i < n_right else "4"}
+            )
+            for i in range(10)
+        ]
+        (eval_dir / f"{label}.examples.jsonl").write_text("\n".join(lines) + "\n")
 
 
 def test_cli_gate_pass_and_fail(tmp_path):

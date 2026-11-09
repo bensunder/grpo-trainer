@@ -124,6 +124,27 @@ def _to_decimal(token: str) -> Decimal | None:
     return d.normalize() if d != 0 else Decimal(0)
 
 
+def final_number_lenient(text: str) -> Decimal | None:
+    """The LAST number anywhere in the text, ignoring tags and format.
+
+    Measures whether the model knows the answer independent of output-format compliance. Used only for
+    evaluation (never as a training reward: it is trivially hackable by appending a number).
+    """
+    if not text:
+        return None
+    t = normalize_text(text).replace("\u2212", "-")
+    tokens = _NUMBER_RE.findall(t)
+    for tok in reversed(tokens):
+        v = _to_decimal(tok)
+        if v is not None:
+            return v
+    return None
+
+
+def lenient_correct(text: str, ground_truth: str | None) -> bool:
+    return numbers_equal(final_number_lenient(text), ground_truth)
+
+
 def parse_gsm8k_ground_truth(answer_field: str) -> str | None:
     """GSM8K `answer` ends with `#### <number>`; return the normalised number as a string."""
     if not isinstance(answer_field, str):

@@ -3,11 +3,21 @@
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from collections.abc import Iterable
+from dataclasses import asdict, dataclass
 from typing import Any
 
 from .config import GateConfig
 from .errors import GateFailedError
+from .rewards.parsing import lenient_correct
+
+COMPARABLE_KEYS = (
+    "split",
+    "num_examples",
+    "dataset_fingerprint",
+    "max_completion_length",
+    "system_prompt_sha",
+)
 
 
 def pass_at_k(n: int, c: int, k: int) -> float:
@@ -24,36 +34,139 @@ def pass_at_k(n: int, c: int, k: int) -> float:
     return 1.0 - math.prod((n - c - i) / (n - i) for i in range(k))
 
 
+def mcnemar_exact(only_base: int, only_candidate: int) -> float:
+    """Two-sided exact McNemar p-value from the discordant pair counts.
+
+    Under H0 (no difference) each disagreement is a fair coin, so the smaller count ~ Binomial(n, 0.5).
+    Questions both models got right (or both wrong) carry no information and are excluded by design.
+    """
+    if only_base < 0 or only_candidate < 0:
+        raise ValueError("counts must be non-negative")
+    n = only_base + only_candidate
+    if n == 0:
+        return 1.0
+    k = min(only_base, only_candidate)
+    tail = sum(math.comb(n, i) for i in range(k + 1)) / 2**n
+    return min(1.0, 2 * tail)
+
+
+@dataclass(frozen=True)
+class PairedLenient:
+    n: int
+    base_accuracy: float
+    candidate_accuracy: float
+    only_base_correct: int
+    only_candidate_correct: int
+    p_value: float
+
+    @property
+    def delta(self) -> float:
+        return self.candidate_accuracy - self.base_accuracy
+
+
+def paired_lenient(base_rows: Iterable[dict[str, Any]], cand_rows: Iterable[dict[str, Any]]) -> PairedLenient:
+    """Re-score both models' saved outputs leniently and pair them by question id.
+
+    Recomputed from `output` + `ground_truth` rather than trusting a stored flag, so it also works on
+    reports written before lenient scoring existed.
+    """
+
+    def index(rows: Iterable[dict[str, Any]], label: str) -> dict[str, bool]:
+        out: dict[str, bool] = {}
+        for r in rows:
+            try:
+                qid, text, gt = str(r["id"]), r.get("output") or "", r["ground_truth"]
+            except KeyError as e:
+                raise GateFailedError(f"{label} examples missing field {e}") from None
+            if qid in out:
+                raise GateFailedError(f"{label} examples contain duplicate id {qid!r}")
+            out[qid] = lenient_correct(text, str(gt))
+        return out
+
+    b, c = index(base_rows, "base"), index(cand_rows, "candidate")
+    if set(b) != set(c):
+        only = sorted(set(b) ^ set(c))[:5]
+        raise GateFailedError(f"base and candidate were evaluated on different questions (e.g. {only})")
+    if not b:
+        raise GateFailedError("no evaluated examples to compare")
+    only_base = sum(b[q] and not c[q] for q in b)
+    only_cand = sum(c[q] and not b[q] for q in b)
+    n = len(b)
+    return PairedLenient(
+        n=n,
+        base_accuracy=sum(b.values()) / n,
+        candidate_accuracy=sum(c.values()) / n,
+        only_base_correct=only_base,
+        only_candidate_correct=only_cand,
+        p_value=mcnemar_exact(only_base, only_cand),
+    )
+
+
 @dataclass(frozen=True)
 class GateResult:
     passed: bool
-    accuracy_delta: float
+    accuracy_delta: float  # strict: <answer>-tagged answer correct (format + knowledge)
     format_delta: float
+    lenient_accuracy_base: float
+    lenient_accuracy_candidate: float
+    lenient_delta: float  # knowledge only, format ignored
+    only_base_correct: int
+    only_candidate_correct: int
+    p_value: float
+    significant: bool
     reasons: tuple[str, ...]
 
     def to_dict(self) -> dict[str, Any]:
-        return {
-            "passed": self.passed,
-            "accuracy_delta": self.accuracy_delta,
-            "format_delta": self.format_delta,
-            "reasons": list(self.reasons),
-        }
+        d = asdict(self)
+        d["reasons"] = list(self.reasons)
+        return d
 
 
-def evaluate_gate(base: dict[str, Any], candidate: dict[str, Any], gate: GateConfig) -> GateResult:
-    """Compare two eval reports produced by `grpo eval` on the same split/limit."""
-    for key in ("split", "num_examples", "dataset_fingerprint", "max_completion_length", "system_prompt_sha"):
+def evaluate_gate(
+    base: dict[str, Any],
+    candidate: dict[str, Any],
+    gate: GateConfig,
+    base_rows: Iterable[dict[str, Any]],
+    cand_rows: Iterable[dict[str, Any]],
+) -> GateResult:
+    """Compare two eval reports (and their per-question outputs) produced by `grpo eval`."""
+    for key in COMPARABLE_KEYS:
         if base.get(key) != candidate.get(key):
             raise GateFailedError(
                 f"reports are not comparable: {key} differs ({base.get(key)!r} vs {candidate.get(key)!r})"
             )
     acc_delta = float(candidate["greedy"]["accuracy"]) - float(base["greedy"]["accuracy"])
     fmt_delta = float(candidate["greedy"]["format_rate"]) - float(base["greedy"]["format_rate"])
+    lp = paired_lenient(base_rows, cand_rows)
+    if lp.n != int(base["num_examples"]):
+        raise GateFailedError(f"examples file has {lp.n} rows but report says {base['num_examples']}")
+    significant = lp.p_value <= gate.alpha and lp.only_candidate_correct > lp.only_base_correct
+
     reasons: list[str] = []
     if acc_delta < gate.min_accuracy_delta:
-        reasons.append(f"accuracy delta {acc_delta:+.4f} < required {gate.min_accuracy_delta:+.4f}")
+        reasons.append(f"strict accuracy delta {acc_delta:+.4f} < required {gate.min_accuracy_delta:+.4f}")
     if fmt_delta < -gate.max_format_regression:
         reasons.append(f"format rate regressed {fmt_delta:+.4f} (allowed -{gate.max_format_regression:.4f})")
+    if lp.delta < gate.min_lenient_accuracy_delta:
+        reasons.append(
+            f"lenient (reasoning) accuracy delta {lp.delta:+.4f} "
+            f"< required {gate.min_lenient_accuracy_delta:+.4f}"
+        )
+    if gate.require_significant_gain and not significant:
+        reasons.append(
+            f"reasoning gain not significant: only-candidate {lp.only_candidate_correct} vs only-base "
+            f"{lp.only_base_correct}, p={lp.p_value:.4f} (need p <= {gate.alpha} in candidate's favour)"
+        )
     return GateResult(
-        passed=not reasons, accuracy_delta=acc_delta, format_delta=fmt_delta, reasons=tuple(reasons)
+        passed=not reasons,
+        accuracy_delta=acc_delta,
+        format_delta=fmt_delta,
+        lenient_accuracy_base=lp.base_accuracy,
+        lenient_accuracy_candidate=lp.candidate_accuracy,
+        lenient_delta=lp.delta,
+        only_base_correct=lp.only_base_correct,
+        only_candidate_correct=lp.only_candidate_correct,
+        p_value=lp.p_value,
+        significant=significant,
+        reasons=tuple(reasons),
     )

@@ -132,8 +132,15 @@ class ProfilerConfig(_Strict):
 
 
 class GateConfig(_Strict):
+    # Strict accuracy: answer must be inside <answer> tags (format + knowledge).
     min_accuracy_delta: float = 0.03  # absolute, e.g. 0.03 = +3 points
     max_format_regression: float = 0.0  # candidate format rate may not drop more than this
+    # Lenient accuracy: final number anywhere in the output (knowledge only, format ignored).
+    # Default 0.0 = format gains may never hide a reasoning regression.
+    min_lenient_accuracy_delta: float = 0.0
+    # Paired exact (McNemar) test on per-question lenient correctness.
+    require_significant_gain: bool = False
+    alpha: float = Field(default=0.05, gt=0.0, lt=1.0)
 
 
 class EvalConfig(_Strict):

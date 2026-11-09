@@ -142,22 +142,49 @@ def main(argv: list[str] | None = None) -> int:
         return 130
 
 
+def _read_jsonl(path: Path) -> list[dict]:
+    rows = []
+    with path.open(encoding="utf-8") as f:
+        for n, line in enumerate(f, 1):
+            if line.strip():
+                try:
+                    rows.append(json.loads(line))
+                except json.JSONDecodeError as e:
+                    raise GateFailedError(f"corrupt {path} line {n}: {e}") from None
+    return rows
+
+
 def _gate(cfg: Config) -> int:
     from .manifest import atomic_write_json
     from .metrics import evaluate_gate
 
     eval_dir = cfg.run_dir / "eval"
-    paths = {label: eval_dir / f"{label}.json" for label in ("base", "trained")}
-    missing = [str(p) for p in paths.values() if not p.is_file()]
+    labels = ("base", "trained")
+    needed = [eval_dir / f"{lb}.json" for lb in labels] + [eval_dir / f"{lb}.examples.jsonl" for lb in labels]
+    missing = [str(p) for p in needed if not p.is_file()]
     if missing:
-        raise GateFailedError(f"missing eval reports: {missing}; run `grpo eval` for base and trained")
-    base, cand = (json.loads(Path(p).read_text()) for p in paths.values())
-    result = evaluate_gate(base, cand, cfg.eval.gate)
+        raise GateFailedError(f"missing eval outputs: {missing}; run `grpo eval` for base and trained")
+    base, cand = (json.loads((eval_dir / f"{lb}.json").read_text()) for lb in labels)
+    base_rows, cand_rows = (_read_jsonl(eval_dir / f"{lb}.examples.jsonl") for lb in labels)
+    result = evaluate_gate(base, cand, cfg.eval.gate, base_rows, cand_rows)
     atomic_write_json(eval_dir / "gate.json", result.to_dict())
     print(json.dumps(result.to_dict(), indent=2))
+    log.info(
+        "format %+.1f pts | strict accuracy %+.1f pts | lenient (reasoning) %.1f%% -> %.1f%% (%+.1f pts); "
+        "only-trained-right %d vs only-base-right %d, p=%.4f%s",
+        100 * result.format_delta,
+        100 * result.accuracy_delta,
+        100 * result.lenient_accuracy_base,
+        100 * result.lenient_accuracy_candidate,
+        100 * result.lenient_delta,
+        result.only_candidate_correct,
+        result.only_base_correct,
+        result.p_value,
+        " (significant)" if result.significant else " (not significant)",
+    )
     if not result.passed:
         raise GateFailedError("gate failed: " + "; ".join(result.reasons))
-    log.info("gate passed: accuracy %+.4f, format %+.4f", result.accuracy_delta, result.format_delta)
+    log.info("gate passed")
     return 0
 
 

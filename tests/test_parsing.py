@@ -5,7 +5,9 @@ import pytest
 from grpo_trainer.rewards.parsing import (
     completion_to_text,
     extract_answer,
+    final_number_lenient,
     format_decimal,
+    lenient_correct,
     match_contract,
     numbers_equal,
     parse_gsm8k_ground_truth,
@@ -133,3 +135,24 @@ def test_numbers_equal():
     assert not numbers_equal(None, "72")
     assert not numbers_equal(Decimal("72"), None)
     assert not numbers_equal(Decimal("72"), "seventy-two")
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("<think>4+3=7</think><answer>7</answer>", Decimal(7)),
+        ("So the answer is 18.", Decimal(18)),  # no tags at all
+        ("Total: $1,234.50", Decimal("1234.5")),
+        ("step 1: 3 apples, step 2: 5 apples -> 8", Decimal(8)),  # last number wins
+        ("**−12**", Decimal(-12)),
+        ("no digits here", None),
+        ("", None),
+    ],
+)
+def test_final_number_lenient(text, expected):
+    assert final_number_lenient(text) == expected
+
+
+def test_lenient_correct_ignores_format():
+    assert lenient_correct("I think it is 72", "72")
+    assert not lenient_correct("<answer>72</answer> but maybe 73", "72")  # last number counts

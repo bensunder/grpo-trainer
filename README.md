@@ -55,7 +55,7 @@ Docker alternative: `docker build -t grpo-trainer .` (base image tag unverified;
 | `grpo profile ...` | Samples the base model K times per prompt; caches pass rates under `runs/_cache/profiles/`. |
 | `scripts/train.sh gpu24 [--set k=v]` | `accelerate launch` training. Resumes automatically; refuses to resume with a changed config. |
 | `grpo eval ... --model <id or path> --label base\|trained` | Held-out greedy accuracy, format rate, truncation, pass@k, per-example JSONL. |
-| `grpo gate ...` | Compares the two reports; exit 6 if the trained model doesn't clear the gate. |
+| `grpo gate ...` | Compares the two models on the same questions (see Gate below); exit 6 if it fails. |
 
 Any config value can be overridden: `--set grpo.max_steps=50 --set eval.limit=200`.
 Exit codes: `2` config, `3` preflight, `4` data, `5` manifest mismatch, `6` gate failed.
@@ -97,6 +97,23 @@ CUDA_VISIBLE_DEVICES=1,2,3 scripts/train.sh multi
 - **Run manifest** (`runs/<name>/manifest.json`): config fingerprint, dataset fingerprint, package
   versions, git revision, host, resume history.
 
+## Gate: format gain vs reasoning gain
+
+Strict accuracy (answer must be inside `<answer>` tags) mixes two things: learning the output format and
+actually knowing more answers. The gate separates them, recomputing everything from the saved
+per-question outputs:
+
+| Reported | Meaning | Default requirement |
+|---|---|---|
+| `format_delta` | change in full `<think>/<answer>` compliance | must not regress |
+| `accuracy_delta` | strict accuracy change (format + knowledge) | >= +3 pts |
+| `lenient_delta` | last number in the output correct, format ignored (knowledge only) | >= 0 (no reasoning regression) |
+| `only_base_correct` / `only_candidate_correct` / `p_value` | exact paired McNemar test on the same questions | reported; enforce with `eval.gate.require_significant_gain=true` |
+
+First real result (RTX A4000, Qwen2.5-1.5B, 20 steps, 100 test questions): format 58% -> 100%, strict
+41% -> 76%, lenient 66% -> 76%; 14 questions fixed vs 4 broken, p = 0.031. Most of the strict gain was
+format; the ~10-pt lenient gain was significant at 5% on this sample.
+
 ## Metrics to watch (TensorBoard: `runs/<name>/checkpoints`)
 
 | Metric | Healthy | Problem |
@@ -115,7 +132,7 @@ CUDA_VISIBLE_DEVICES=1,2,3 scripts/train.sh multi
 
 ## Verification status
 
-Verified in CPU runs (`pytest`, 194 tests):
+Verified in CPU runs (`pytest`, 221 tests):
 - Parsing, reward scoring and the TRL-facing wrapper; config validation and overrides; tasks,
   contamination removal, profiling selection; pass@k and gate; manifest/resume guards; memory estimates.
 - **Real TRL 1.17.1 `GRPOTrainer` end-to-end on CPU** with a randomly initialised tiny Qwen2 (vLLM off,
