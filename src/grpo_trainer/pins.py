@@ -14,6 +14,7 @@ PINNED: dict[str, str] = {
     "datasets": "5.1.0",
     "peft": "0.21.2",
     "bitsandbytes": "0.50.2",
+    "tensorboard": "2.21.0",
 }
 
 # torch 2.13.0 PyPI wheels ship CUDA 13 runtime libraries. The host driver must support CUDA 13.

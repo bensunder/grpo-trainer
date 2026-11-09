@@ -26,6 +26,7 @@ train = [
     "datasets==5.1.0",
     "peft==0.21.2",
     "bitsandbytes==0.50.2",
+    "tensorboard==2.21.0",  # default report_to backend; transformers raises at Trainer init without it
 ]
 # Multi-GPU full fine-tune (configs/profiles/multi.yaml). Source build; not in requirements.lock.
 multi = [

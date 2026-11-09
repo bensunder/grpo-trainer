@@ -22,8 +22,9 @@ preflight ──► profile ──► train ──► eval(base) + eval(trained)
 | torch | 2.13.0 | hard-pinned by vLLM 0.32.0; PyPI wheels are **CUDA 13** |
 | transformers | 5.19.0 | vLLM requires `<5.20`; 5.x removed `warmup_ratio` |
 | peft / accelerate / datasets / bitsandbytes | 0.21.2 / 1.15.0 / 5.1.0 / 0.50.2 | |
+| tensorboard | 2.21.0 | default `report_to`; transformers raises at Trainer init without it |
 
-`requirements.lock` is the full 209-package closure, resolved for Python 3.12 / Linux x86_64.
+`requirements.lock` is the full 214-package closure, resolved for Python 3.12 / Linux x86_64.
 `grpo preflight` refuses to run on any drift. Regenerate with `scripts/relock.sh`.
 
 **Host requirement:** an NVIDIA driver that supports CUDA 13 (`nvidia-smi` header shows `CUDA Version: 13.x`).
@@ -100,7 +101,7 @@ CUDA_VISIBLE_DEVICES=1,2,3 scripts/train.sh multi
 |---|---|---|
 | `rewards/correctness/mean` | rising | flat while `rewards/format/mean` rises → format hacking |
 | `frac_reward_zero_std` | well below 1 | near 1 → no learning signal; re-profile or change band |
-| `completions/clipped_ratio` | low | high → raise `max_completion_length` or strengthen length penalty |
+| `completions/clipped_ratio` | low | near 1 → truncated completions are masked out of the loss, so training is a no-op; raise `max_completion_length` |
 | `reward_errors/*` | 0 | > 0 → a reward function is throwing; check logs |
 
 ## Extending
@@ -112,15 +113,19 @@ CUDA_VISIBLE_DEVICES=1,2,3 scripts/train.sh multi
 
 ## Verification status
 
-Verified in CI-equivalent CPU runs (`pytest`, 189 tests):
+Verified in CPU runs (`pytest`, 192 tests):
 - Parsing, reward scoring and the TRL-facing wrapper; config validation and overrides; tasks,
   contamination removal, profiling selection; pass@k and gate; manifest/resume guards; memory estimates.
-- **Real TRL 1.17.1 `GRPOTrainer` end-to-end on CPU** with a tiny Qwen2 model: rewards called and logged
-  by name, LoRA training, checkpoints, adapter save, merge, `COMPLETE`, idempotent re-run,
-  crash-after-checkpoint recovery, and SIGTERM → checkpoint → resume to completion.
+- **Real TRL 1.17.1 `GRPOTrainer` end-to-end on CPU** with a randomly initialised tiny Qwen2 (vLLM off,
+  3 steps): rewards called and logged by name; a non-zero gradient on the step whose group had reward
+  variance and zero gradient on zero-variance steps; non-zero LoRA B weights in the saved adapter;
+  TensorBoard event files; checkpoints, merge, `COMPLETE`, idempotent re-run, crash-after-checkpoint
+  recovery, and SIGTERM → checkpoint → resume to completion. This proves the plumbing, not learning:
+  a random model can't improve on GSM8K.
 - `GRPOConfig` constructed from every shipped profile against the real installed TRL.
 - Profiler and eval stage logic against a deterministic fake vLLM engine.
-- The full pinned dependency set resolves without conflicts for Python 3.12 / Linux.
+- The full pinned set resolves without conflicts for Python 3.12 / Linux (dry-run resolution; vLLM and
+  bitsandbytes were not installed or imported here).
 
 **Not yet verified (needs a GPU host):** vLLM colocate/server generation, the real `vllm.LLM.chat`
 call path in profile/eval, QLoRA weight sync to vLLM, ZeRO-3, the Docker build (base image tag

@@ -86,9 +86,24 @@ def test_run_train_end_to_end_and_resume(tiny_model_dir, tmp_path, monkeypatch, 
         train_mod, "grpo_config_kwargs", lambda cfg, out: {**real_kwargs(cfg, out), "use_cpu": True}
     )
 
+    # A random tiny model scores 0 on every real reward, so every group has zero std -> zero advantage ->
+    # zero gradient, and "training" would silently update nothing. This probe reward varies with the
+    # sampled text, giving non-zero advantages so the test proves weights actually move.
+    import zlib
+
+    from grpo_trainer.rewards import registry
+
+    class TextParityProbe:
+        def __call__(self, text, *, completion_ids, row):
+            return float(zlib.crc32(text.encode()) % 2)
+
+    monkeypatch.setitem(registry.REGISTRY, "probe", lambda params, ctx: TextParityProbe())
+
     cfg = config_factory(
         f"run.output_root={tmp_path}",
         "run.name=cpu-e2e",
+        "rewards=[{name: correctness, weight: 1.0}, {name: format, weight: 0.2}, "
+        "{name: length, weight: 0.1}, {name: probe, weight: 0.5}]",
         f"model.name_or_path={tiny_model_dir}",
         "model.dtype=float32",
         "model.attn_implementation=eager",
@@ -103,7 +118,12 @@ def test_run_train_end_to_end_and_resume(tiny_model_dir, tmp_path, monkeypatch, 
         "grpo.save_steps=2",
         "grpo.logging_steps=1",
         "grpo.gradient_checkpointing=false",
-        "grpo.report_to=[none]",
+        "grpo.learning_rate=1.0e-2",
+        # A random model never emits EOS, so every completion hits the 16-token cap. With the default
+        # mask_truncated_completions=true those are all excluded from the loss (zero gradient).
+        "grpo.mask_truncated_completions=false",
+        "grpo.warmup_steps=0",
+        "grpo.report_to=[tensorboard]",  # the shipped default backend, exercised for real
         "grpo.log_completions=false",
         "vllm.enabled=false",
         "profiler.enabled=false",
@@ -127,9 +147,22 @@ def test_run_train_end_to_end_and_resume(tiny_model_dir, tmp_path, monkeypatch, 
     # Our reward functions were actually called by TRL and logged per name.
     state = json.loads((run_dir / "checkpoints" / "checkpoint-3" / "trainer_state.json").read_text())
     logged = set().union(*(h.keys() for h in state["log_history"]))
-    for name in ("correctness", "format", "length"):
+    for name in ("correctness", "format", "length", "probe"):
         assert f"rewards/{name}/mean" in logged, sorted(logged)
     assert "frac_reward_zero_std" in logged
+
+    # A real update happened: non-zero gradient on at least one step, and LoRA B (initialised to
+    # zero by PEFT) is non-zero in the saved adapter.
+    grad_norms = [float(h["grad_norm"]) for h in state["log_history"] if "grad_norm" in h]
+    assert grad_norms and max(grad_norms) > 0, grad_norms
+    from safetensors.torch import load_file
+
+    weights = load_file(str(final / "adapter" / "adapter_model.safetensors"))
+    lora_b = [t for k, t in weights.items() if "lora_B" in k]
+    assert lora_b and any(t.abs().sum().item() > 0 for t in lora_b)
+
+    # TensorBoard event files were written by the default report_to backend.
+    assert list((run_dir / "checkpoints").rglob("events.out.tfevents.*"))
 
     def checkpoints():
         return sorted(p.name for p in (run_dir / "checkpoints").glob("checkpoint-*"))

@@ -224,8 +224,9 @@ def run_train(cfg: Config, *, resume: bool = True, force: bool = False, skip_pre
     last = get_last_checkpoint(str(ckpt_dir)) if (resume and ckpt_dir.is_dir()) else None
     last_step = _checkpoint_step(last) if last else 0
 
-    # Idempotency: re-running a finished command must not train extra steps. (transformers resumes a
-    # checkpoint already at max_steps by running one more step, so this is guarded explicitly.)
+    # Idempotency: re-running a finished command must not train extra steps. Observed with
+    # transformers 5.19 + TRL 1.17.1: resuming a checkpoint already at max_steps ran one more step
+    # (root cause not isolated), so this is guarded explicitly and covered by a test.
     if resume and (final_dir / "COMPLETE").is_file():
         log.info("run already complete (%s); nothing to do", final_dir / "COMPLETE")
         return final_dir

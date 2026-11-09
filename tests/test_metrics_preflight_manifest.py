@@ -142,3 +142,30 @@ def test_manifest_create_resume_and_mismatch(tmp_path, config_factory):
 def test_atomic_write_leaves_no_temp_files(tmp_path):
     atomic_write_json(tmp_path / "x.json", {"a": 1})
     assert [p.name for p in tmp_path.iterdir()] == ["x.json"]
+
+
+# ------------------------------------------------------------------ trackers
+
+
+def test_tracker_check_fails_when_backend_missing(base_config):
+    from grpo_trainer.preflight import check_trackers
+
+    assert base_config.grpo.report_to == ["tensorboard"]  # the shipped default
+    assert check_trackers(base_config, find_spec=lambda m: None).status is Status.FAIL
+    assert check_trackers(base_config, find_spec=lambda m: object()).status is Status.OK
+
+
+def test_tracker_check_none_always_ok(config_factory):
+    from grpo_trainer.preflight import check_trackers
+
+    cfg = config_factory("grpo.report_to=[none]")
+    assert check_trackers(cfg, find_spec=lambda m: None).status is Status.OK
+
+
+def test_tensorboard_is_pinned():
+    # The default config reports to tensorboard; it must be part of the pinned, locked stack.
+    from pathlib import Path
+
+    assert "tensorboard" in PINNED
+    lock = (Path(__file__).resolve().parents[1] / "requirements.lock").read_text().splitlines()
+    assert f"tensorboard=={PINNED['tensorboard']}" in lock

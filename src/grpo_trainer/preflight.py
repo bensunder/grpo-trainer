@@ -251,6 +251,33 @@ def check_disk(cfg: Config) -> CheckResult:
     return CheckResult("disk", Status.OK, f"{free_gb:.0f} GiB free at {probe}")
 
 
+_TRACKER_MODULES = {
+    "tensorboard": ("tensorboard", "tensorboardX"),
+    "wandb": ("wandb",),
+    "mlflow": ("mlflow",),
+    "trackio": ("trackio",),
+}
+
+
+def check_trackers(cfg: Config, find_spec=None) -> CheckResult:
+    """transformers raises at Trainer init if a report_to backend isn't importable; catch it here."""
+    import importlib.util
+
+    find_spec = find_spec or importlib.util.find_spec
+    missing = []
+    for tracker in cfg.grpo.report_to:
+        modules = _TRACKER_MODULES.get(tracker)
+        if modules and not any(find_spec(m) is not None for m in modules):
+            missing.append(tracker)
+    if missing:
+        return CheckResult(
+            "trackers",
+            Status.FAIL,
+            f"report_to {missing} not installed; install it or set grpo.report_to=[none]",
+        )
+    return CheckResult("trackers", Status.OK, f"report_to {cfg.grpo.report_to}")
+
+
 # ------------------------------------------------------------------ orchestration
 
 
@@ -264,6 +291,7 @@ def run_preflight(cfg: Config, *, require_gpu: bool = True) -> list[CheckResult]
         )
     ]
     results.append(check_versions())
+    results.append(check_trackers(cfg))
     results.append(check_disk(cfg))
     if cfg.hardware.num_processes > 1 and cfg.adapter.mode == "none":
         has_ds = installed_versions(["deepspeed"]).get("deepspeed")
