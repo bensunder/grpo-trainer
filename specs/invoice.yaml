@@ -1,0 +1,81 @@
+# Supplier-invoice extraction: the first proof-point use case.
+# Data: synthetic invoices from `grpo synth invoices --out data/invoices` (swap in customer JSONL later).
+# Validate before any GPU run:  grpo spec check --spec specs/invoice.yaml
+spec_version: 1
+name: invoice-extraction
+description: Header fields and line items from supplier invoices for AP automation.
+instructions: >-
+  The document is a supplier invoice. total_amount is the invoice grand total including tax and
+  shipping, before any payments or credits: it is never "Balance Due" or "Amount Paid".
+  Amounts may use European notation (1.234,56 means one thousand two hundred thirty-four point
+  fifty-six). Output amounts as plain JSON numbers. currency is the ISO code of the invoice currency.
+
+fields:
+  invoice_number:
+    type: string
+    match: normalized
+    nullable: false
+    description: the supplier's invoice identifier, exactly as printed
+  invoice_date:
+    type: date
+    nullable: false
+    description: date the invoice was issued
+  due_date:
+    type: date
+    description: payment due date, if printed
+  vendor_name:
+    type: string
+    match: normalized
+    nullable: false
+    description: the supplier issuing the invoice
+  customer_name:
+    type: string
+    match: normalized
+    description: the billed party
+  po_number:
+    type: string
+    match: normalized
+    description: purchase order or customer reference number, if printed
+  currency:
+    type: enum
+    values: [USD, EUR, GBP, CAD]
+    nullable: false
+  subtotal:
+    type: number
+    tolerance: 0.01
+  tax_amount:
+    type: number
+    tolerance: 0.01
+    description: total tax (0 when the invoice shows tax as exempt)
+  shipping_amount:
+    type: number
+    tolerance: 0.01
+    description: shipping and handling charge, if any
+  total_amount:
+    type: number
+    tolerance: 0.01
+    weight: 2.0
+    nullable: false
+  line_items:
+    type: object_list
+    weight: 2.0
+    fields:
+      description: {type: string, match: fuzzy, threshold: 0.85}
+      quantity: {type: number, tolerance: 0.0}
+      unit_price: {type: number, tolerance: 0.01}
+      amount: {type: number, tolerance: 0.01}
+
+output:
+  reasoning: true
+
+scoring:
+  mode: weighted_fields
+
+data:
+  splits:
+    train: ../data/invoices/train.jsonl
+    eval: ../data/invoices/eval.jsonl
+  input_field: text
+  label_field: label
+  id_field: id
+  max_input_chars: 6000

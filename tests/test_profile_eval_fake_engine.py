@@ -34,9 +34,9 @@ def bad():
 @pytest.fixture
 def fake_env(monkeypatch):
     task = GSM8KTask(loader=lambda split: {"train": TRAIN, "test": TEST}[split])
-    monkeypatch.setattr(data_mod, "get_task", lambda name: task)
-    monkeypatch.setattr(prof_mod, "get_task", lambda name: task)
-    monkeypatch.setattr(eval_mod, "get_task", lambda name: task)
+    monkeypatch.setattr(data_mod, "get_task", lambda name, **_: task)
+    monkeypatch.setattr(prof_mod, "task_for", lambda cfg: task)
+    monkeypatch.setattr(eval_mod, "task_for", lambda cfg: task)
     calls = []
 
     @contextmanager

@@ -92,7 +92,7 @@ def test_load_splits_drops_contamination(monkeypatch, config_factory):
     cfg = config_factory("task.train_limit=3")
     train = rows(5)
     test = [{"question": "Question 1?", "answer": "#### 1"}]
-    monkeypatch.setattr(data_mod, "get_task", lambda name: make_task(train, test))
+    monkeypatch.setattr(data_mod, "get_task", lambda name, **_: make_task(train, test))
     splits = data_mod.load_splits(cfg)
     assert splits.contaminated_dropped == 1
     assert [e.question for e in splits.train] == ["Question 0?", "Question 2?", "Question 3?"]

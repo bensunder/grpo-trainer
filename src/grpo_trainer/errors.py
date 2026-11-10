@@ -37,3 +37,15 @@ class GateFailedError(GRPOTrainerError):
     """Trained model did not clear the eval gate."""
 
     exit_code = 6
+
+
+class BudgetError(GRPOTrainerError):
+    """A paid API run would exceed (or has reached) its configured spend limit."""
+
+    exit_code = 7
+
+
+class ProviderError(GRPOTrainerError):
+    """A frontier API run cannot proceed: missing key, auth failure, circuit open, too many errors."""
+
+    exit_code = 8

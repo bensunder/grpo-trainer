@@ -1,0 +1,143 @@
+# Structured-extraction GRPO run: the "verified small-model replacement" pilot.
+# Hardware profiles (configs/profiles/*.yaml) merge on top of this file exactly as with base.yaml.
+#   grpo spec check --spec specs/invoice.yaml                       # data + reward self-test, no GPU
+#   grpo validate   --config configs/extraction.yaml --profile gpu16 --print
+#   CONFIG=configs/extraction.yaml bash scripts/pipeline.sh gpu16
+
+run:
+  name: invoice-extraction-qwen2.5-1.5b-grpo
+  output_root: runs
+  seed: 42
+
+model:
+  name_or_path: Qwen/Qwen2.5-1.5B-Instruct
+  revision: null
+  dtype: bfloat16
+  attn_implementation: sdpa
+
+adapter:
+  mode: lora
+  r: 32
+  alpha: 64
+  dropout: 0.0
+  target_modules: all-linear
+
+task:
+  name: extraction
+  spec: specs/invoice.yaml   # relative to the directory you run grpo from (the repo root)
+  train_split: train
+  eval_split: eval
+  system_prompt: null        # null -> compiled from the spec (recommended: no train/serve skew)
+  typical_prompt_tokens: 900 # invoice prompt incl. system prompt; drives the memory estimate
+
+# Field-level partial credit dominates; format = schema-exact JSON in the contract tags.
+rewards:
+  - name: correctness
+    weight: 1.0
+  - name: format
+    weight: 0.2
+    params:
+      min_think_chars: 20
+  - name: length
+    weight: 0.1
+    params:
+      soft_fraction: 0.75
+
+grpo:
+  num_generations: 8
+  max_completion_length: 1024   # think + JSON with up to ~5 line items
+  temperature: 1.0
+  top_p: 1.0
+  learning_rate: 1.0e-5
+  lr_scheduler_type: constant_with_warmup
+  warmup_steps: 0.03
+  max_grad_norm: 1.0
+  per_device_train_batch_size: 4
+  gradient_accumulation_steps: 8
+  max_steps: 300
+  beta: 0.0
+  epsilon: 0.2
+  loss_type: dapo
+  scale_rewards: group
+  mask_truncated_completions: true
+  gradient_checkpointing: true
+  logging_steps: 5
+  save_steps: 50
+  save_total_limit: 3
+  log_completions: true
+  num_completions_to_print: 2
+  report_to: [tensorboard]
+
+vllm:
+  enabled: true
+  mode: colocate
+  gpu_memory_utilization: 0.35
+  enable_sleep_mode: true
+  max_model_length: 3072        # longest prompt (~1k tokens, see `grpo spec check`) + completion
+
+profiler:
+  enabled: true
+  samples_per_prompt: 8
+  max_prompts: 2000
+  # Partial credit: keep prompts whose field scores vary across samples, even if never fully solved.
+  select: reward_variance
+  min_score_std: 0.0
+  gpu_memory_utilization: 0.85
+
+eval:
+  limit: 300
+  pass_k: 4
+  pass_k_temperature: 0.7
+  gpu_memory_utilization: 0.85
+  gate:
+    min_accuracy_delta: 0.03
+    max_format_regression: 0.0
+    min_lenient_accuracy_delta: 0.0
+    require_significant_gain: true
+    alpha: 0.05
+
+# The customer's current API model(s), run on the same held-out split. PAID: dry-run first.
+#   grpo baseline --config configs/extraction.yaml --profile gpu16 --provider <name> --dry-run
+# Prices are USD per million tokens and must be copied from the provider's current price sheet.
+baseline:
+  max_cost_usd: 25.0
+  max_error_rate: 0.02
+  circuit_breaker_failures: 5
+  providers: []
+  # providers:
+  #   - name: openai-frontier
+  #     kind: openai
+  #     model: <model id>
+  #     api_key_env: OPENAI_API_KEY
+  #     input_usd_per_mtok: <from price sheet>
+  #     output_usd_per_mtok: <from price sheet>
+  #     max_concurrency: 8
+  #     requests_per_minute: 300
+  #   - name: azure-frontier
+  #     kind: azure_openai
+  #     base_url: https://<resource>.openai.azure.com
+  #     api_version: <api version>
+  #     model: <deployment name>
+  #     api_key_env: AZURE_OPENAI_API_KEY
+  #     input_usd_per_mtok: <from price sheet>
+  #     output_usd_per_mtok: <from price sheet>
+  #   - name: anthropic-frontier
+  #     kind: anthropic
+  #     model: <model id>
+  #     api_key_env: ANTHROPIC_API_KEY
+  #     input_usd_per_mtok: <from price sheet>
+  #     output_usd_per_mtok: <from price sheet>
+
+# Cost model for the proof report. Leave gpu_hourly_usd / monthly_volume null to omit savings.
+economics:
+  serving_gpu: unspecified
+  gpu_hourly_usd: null
+  replicas: 1
+  monthly_volume: null
+  target_utilization: 0.6
+
+report:
+  title: Invoice extraction -- verified small-model replacement
+  customer: null
+  include_examples: 0          # >0 puts input excerpts (customer data) in the report
+  example_input_chars: 600

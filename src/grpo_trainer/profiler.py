@@ -18,17 +18,17 @@ from typing import Any
 from .config import Config
 from .data import load_splits, profile_cache_dir, profiling_sample
 from .manifest import atomic_write_json
-from .rewards.registry import RewardContext, build_scorer
-from .tasks import Example, dataset_fingerprint, get_task
+from .rewards.registry import build_scorer, reward_context
+from .tasks import Example, dataset_fingerprint, task_for
 
 log = logging.getLogger(__name__)
 
 
 def profile_key(cfg: Config, sample: list[Example]) -> str:
     """Identity of a profile: anything that changes pass rates changes the key."""
-    task = get_task(cfg.task.name)
+    task = task_for(cfg)
     correctness = next(r for r in cfg.rewards if r.name == "correctness")
-    payload = {
+    payload: dict[str, Any] = {
         "model": cfg.model.name_or_path,
         "revision": cfg.model.revision,
         "dtype": cfg.model.dtype,
@@ -41,6 +41,9 @@ def profile_key(cfg: Config, sample: list[Example]) -> str:
         "correctness": correctness.params,
         "seed": cfg.run.seed,
     }
+    grading = task.grading_fingerprint()
+    if grading is not None:  # only spec-driven tasks; keeps existing GSM8K cache keys unchanged
+        payload["grading"] = grading
     return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()[:16]
 
 
@@ -74,10 +77,10 @@ def run_profile(cfg: Config, *, force: bool = False) -> Path:
         log.info("profile cache hit: %s (use --force to recompute)", out)
         return out
 
-    task = get_task(cfg.task.name)
+    task = task_for(cfg)
     system_prompt = task.system_prompt(cfg.task.system_prompt)
     correctness_spec = next(r for r in cfg.rewards if r.name == "correctness")
-    scorer = build_scorer(correctness_spec, RewardContext(cfg.grpo.max_completion_length))
+    scorer = build_scorer(correctness_spec, reward_context(cfg, task))
     k = cfg.profiler.samples_per_prompt
 
     log.info("profiling %d prompts x %d samples with %s", len(sample), k, cfg.model.name_or_path)
@@ -98,22 +101,36 @@ def run_profile(cfg: Config, *, force: bool = False) -> Path:
         )
 
     rates: dict[str, float] = {}
+    stds: dict[str, float] = {}
     out.parent.mkdir(parents=True, exist_ok=True)
     tmp = out.with_suffix(".jsonl.tmp")
     with tmp.open("w", encoding="utf-8") as f:
         for ex, samples in zip(sample, results, strict=True):
-            correct = sum(
-                scorer(s.text, completion_ids=s.token_ids, row={"ground_truth": ex.ground_truth}) >= 1.0
-                for s in samples
-            )
+            row = {"ground_truth": ex.ground_truth}
+            scores = [float(scorer(s.text, completion_ids=s.token_ids, row=row)) for s in samples]
+            correct = sum(sc >= 1.0 for sc in scores)
             rate = correct / len(samples)
             rates[ex.id] = rate
-            f.write(
-                json.dumps({"id": ex.id, "pass_rate": rate, "correct": correct, "k": len(samples)}) + "\n"
-            )
+            mean = sum(scores) / len(scores)
+            std = (sum((sc - mean) ** 2 for sc in scores) / len(scores)) ** 0.5
+            stds[ex.id] = std
+            rec = {
+                "id": ex.id,
+                "pass_rate": rate,
+                "correct": correct,
+                "k": len(samples),
+                "score_mean": round(mean, 6),
+                "score_std": round(std, 6),
+            }
+            f.write(json.dumps(rec) + "\n")
     tmp.replace(out)
 
     summary = summarize(rates, k, cfg.profiler.keep_min_pass_rate, cfg.profiler.keep_max_pass_rate)
+    summary["kept_by_score_variance"] = sum(1 for v in stds.values() if v > cfg.profiler.min_score_std)
+    summary["selection"] = cfg.profiler.select
+    if cfg.profiler.select == "reward_variance":
+        summary["kept"] = summary["kept_by_score_variance"]
+        summary["kept_fraction"] = summary["kept"] / summary["prompts"] if summary["prompts"] else 0.0
     atomic_write_json(
         out.with_suffix(".summary.json"), {"key": out.stem, "model": cfg.model.name_or_path, **summary}
     )

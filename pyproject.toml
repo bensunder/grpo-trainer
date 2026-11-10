@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "grpo-trainer"
-version = "0.1.0"
+version = "0.2.0"
 description = "Production GRPO training harness on TRL: validated config, verifiable rewards, difficulty profiling, held-out eval gate."
 readme = "README.md"
 requires-python = ">=3.11,<3.14"
@@ -32,9 +32,17 @@ train = [
 multi = [
     "deepspeed==0.19.9",
 ]
+# Serving gateway (also pinned in the bundle's gateway/requirements.txt).
+serve = [
+    "fastapi==0.162.4",
+    "uvicorn==0.54.0",
+    "httpx==0.28.1",
+]
 dev = [
     "pytest>=8.0",
     "ruff>=0.6",
+    "fastapi==0.162.4",  # gateway tests
+    "httpx==0.28.1",
 ]
 
 [project.scripts]

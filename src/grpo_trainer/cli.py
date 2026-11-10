@@ -6,8 +6,17 @@
   grpo eval      --config ... --profile gpu24 --model Qwen/Qwen2.5-1.5B-Instruct --label base
   grpo eval      --config ... --profile gpu24 --model runs/<name>/final/merged --label trained
   grpo gate      --config ... --profile gpu24
+  grpo baseline  --config ... --profile gpu24 --provider NAME [--dry-run]   # PAID API calls
+  grpo report    --config ... --profile gpu24
+  grpo bundle    --config ... --profile gpu24
 
-Exit codes: 0 ok, 2 config, 3 preflight, 4 data, 5 manifest mismatch, 6 gate failed, 1 other.
+No config needed:
+  grpo spec init  --data train.jsonl --out specs/x.yaml --name x [--eval eval.jsonl]
+  grpo spec check --spec specs/x.yaml [--json]
+  grpo synth invoices --out data/invoices [--train 3000 --eval 300 --seed 7]
+
+Exit codes: 0 ok, 2 config, 3 preflight, 4 data, 5 manifest mismatch, 6 gate failed,
+            7 budget, 8 provider, 1 other.
 """
 
 from __future__ import annotations
@@ -69,7 +78,86 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("gate", help="compare base vs trained eval reports against the gate")
     _common(p)
+
+    p = sub.add_parser("baseline", help="run a frontier API model on the held-out split (PAID)")
+    _common(p)
+    p.add_argument("--provider", required=True, help="baseline.providers[].name")
+    p.add_argument("--dry-run", action="store_true", help="print the cost estimate; send nothing")
+
+    p = sub.add_parser("report", help="write the proof report (HTML + JSON) from saved eval outputs")
+    _common(p)
+
+    p = sub.add_parser("bundle", help="package the gated model with a serving gateway")
+    _common(p)
+    p.add_argument("--out", type=Path, help="output dir (default <run>/bundle)")
+    p.add_argument(
+        "--allow-failed-gate", action="store_true", help="bundle even if the gate failed or never ran"
+    )
+    p.add_argument("--smoke-examples", type=int, default=5, help="held-out examples for smoke_test.py")
+    p.add_argument("--vllm-image", default=None, help="vLLM serving image (default matches the pinned vllm)")
+    p.add_argument("--force", action="store_true", help="replace an existing bundle")
+
+    spec = sub.add_parser("spec", help="extraction spec tools (no config needed)")
+    spec_sub = spec.add_subparsers(dest="spec_command", required=True)
+    p = spec_sub.add_parser("init", help="draft a spec from labelled JSONL")
+    p.add_argument("--data", required=True, type=Path, help="training JSONL")
+    p.add_argument("--eval", dest="eval_data", type=Path, help="held-out JSONL")
+    p.add_argument("--out", required=True, type=Path)
+    p.add_argument("--name", required=True)
+    p.add_argument("--input-field", default="text")
+    p.add_argument("--label-field", default="label")
+    p.add_argument("--force", action="store_true")
+    p.add_argument("--log-level", default="INFO")
+    p = spec_sub.add_parser("check", help="validate labels and self-test the compiled reward")
+    p.add_argument("--spec", required=True, type=Path)
+    p.add_argument("--eval-split", default=None, help="held-out split name (default: eval or test)")
+    p.add_argument("--json", action="store_true", help="print the full report as JSON")
+    p.add_argument("--log-level", default="INFO")
+
+    synth = sub.add_parser("synth", help="generate synthetic datasets (no config needed)")
+    synth_sub = synth.add_subparsers(dest="synth_command", required=True)
+    p = synth_sub.add_parser("invoices", help="synthetic supplier invoices for the extraction proof point")
+    p.add_argument("--out", required=True, type=Path)
+    p.add_argument("--train", type=int, default=3000)
+    p.add_argument("--eval", type=int, default=300)
+    p.add_argument("--seed", type=int, default=7)
+    p.add_argument("--log-level", default="INFO")
     return parser
+
+
+def _no_config_command(args: argparse.Namespace) -> int:
+    if args.command == "spec" and args.spec_command == "init":
+        from .extraction.infer import init_spec
+
+        notes = init_spec(
+            args.data, args.out, name=args.name, input_field=args.input_field, label_field=args.label_field,
+            eval_path=args.eval_data, force=args.force,
+        )
+        log.info(
+            "draft spec -> %s (%d items to review); next: grpo spec check --spec %s",
+            args.out,
+            len(notes),
+            args.out,
+        )
+        for n in notes:
+            log.info("REVIEW %s", n)
+        return 0
+    if args.command == "spec" and args.spec_command == "check":
+        from .errors import DataError
+        from .extraction.selfcheck import check_spec, format_report
+
+        rep = check_spec(args.spec, eval_split=args.eval_split)
+        print(json.dumps(rep.to_dict(), indent=2, default=str) if args.json else format_report(rep))
+        if not rep.ok:
+            raise DataError("spec check failed")
+        return 0
+    if args.command == "synth":
+        from .synth.invoices import generate
+
+        paths = generate(args.out, n_train=args.train, n_eval=args.eval, seed=args.seed)
+        print(json.dumps(paths, indent=2))
+        return 0
+    raise AssertionError(f"unhandled command {args.command}")
 
 
 def _load(args: argparse.Namespace) -> Config:
@@ -94,6 +182,8 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     setup_logging(args.log_level)
     try:
+        if args.command in ("spec", "synth"):
+            return _no_config_command(args)
         cfg = _load(args)
         if args.command == "validate":
             log.info(
@@ -133,6 +223,28 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if args.command == "gate":
             return _gate(cfg)
+        if args.command == "baseline":
+            from .baseline import run_baseline
+
+            result = run_baseline(cfg, args.provider, dry_run=args.dry_run)
+            print(json.dumps(result, indent=2) if isinstance(result, dict) else result)
+            return 0
+        if args.command == "report":
+            from .report import run_report
+
+            print(run_report(cfg))
+            return 0
+        if args.command == "bundle":
+            from .bundle import DEFAULT_VLLM_IMAGE, run_bundle
+
+            print(
+                run_bundle(
+                    cfg, out_dir=args.out, allow_failed_gate=args.allow_failed_gate,
+                    smoke_examples=args.smoke_examples, vllm_image=args.vllm_image or DEFAULT_VLLM_IMAGE,
+                    force=args.force,
+                )
+            )
+            return 0
         raise AssertionError(f"unhandled command {args.command}")
     except GRPOTrainerError as e:
         log.error("%s", e)
@@ -166,7 +278,10 @@ def _gate(cfg: Config) -> int:
         raise GateFailedError(f"missing eval outputs: {missing}; run `grpo eval` for base and trained")
     base, cand = (json.loads((eval_dir / f"{lb}.json").read_text()) for lb in labels)
     base_rows, cand_rows = (_read_jsonl(eval_dir / f"{lb}.examples.jsonl") for lb in labels)
-    result = evaluate_gate(base, cand, cfg.eval.gate, base_rows, cand_rows)
+    from .tasks import task_for
+
+    task = task_for(cfg)
+    result = evaluate_gate(base, cand, cfg.eval.gate, base_rows, cand_rows, task.lenient_correct)
     atomic_write_json(eval_dir / "gate.json", result.to_dict())
     print(json.dumps(result.to_dict(), indent=2))
     log.info(

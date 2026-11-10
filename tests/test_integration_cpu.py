@@ -77,8 +77,8 @@ def test_run_train_end_to_end_and_resume(tiny_model_dir, tmp_path, monkeypatch, 
     rows = [{"question": f"What is {i} plus 3?", "answer": f"#### {i + 3}"} for i in range(12)]
     test_rows = [{"question": "What is 100 plus 3?", "answer": "#### 103"}]
     task = GSM8KTask(loader=lambda split: {"train": rows, "test": test_rows}[split])
-    monkeypatch.setattr(data_mod, "get_task", lambda name: task)
-    monkeypatch.setattr(train_mod, "get_task", lambda name: task)
+    monkeypatch.setattr(data_mod, "get_task", lambda name, **_: task)
+    monkeypatch.setattr(train_mod, "get_task", lambda name, **_: task)
 
     # No GPU here: force CPU and fp32 in the mapped TRL arguments.
     real_kwargs = train_mod.grpo_config_kwargs
@@ -196,8 +196,8 @@ def test_sigterm_checkpoints_then_resume_completes(tiny_model_dir, tmp_path, mon
     task = GSM8KTask(
         loader=lambda split: {"train": rows, "test": [{"question": "q?", "answer": "#### 1"}]}[split]
     )
-    monkeypatch.setattr(data_mod, "get_task", lambda name: task)
-    monkeypatch.setattr(train_mod, "get_task", lambda name: task)
+    monkeypatch.setattr(data_mod, "get_task", lambda name, **_: task)
+    monkeypatch.setattr(train_mod, "get_task", lambda name, **_: task)
     real_kwargs = train_mod.grpo_config_kwargs
     monkeypatch.setattr(train_mod, "grpo_config_kwargs", lambda c, o: {**real_kwargs(c, o), "use_cpu": True})
     monkeypatch.setattr(train_mod._StopFlag, "requested", False)

@@ -182,7 +182,11 @@ def run_train(cfg: Config, *, resume: bool = True, force: bool = False, skip_pre
         profile_path_for(cfg, profiling_sample(cfg, splits.train)) if cfg.profiler.enabled else None
     )
     examples = training_examples(cfg, splits, profile_path)
-    data_fp = fingerprint(examples)
+    task = get_task(cfg.task.name, spec=cfg.task.spec)
+    grading_fp = task.grading_fingerprint()
+    # Grading rules that live in a spec file are part of the training data's meaning: changing a
+    # matcher and resuming would mix two reward definitions in one run. Fold them into the fingerprint.
+    data_fp = fingerprint(examples) if grading_fp is None else f"{fingerprint(examples)}+{grading_fp}"
 
     with state.main_process_first():
         if state.is_main_process:
@@ -195,14 +199,15 @@ def run_train(cfg: Config, *, resume: bool = True, force: bool = False, skip_pre
                     "profile": str(profile_path) if profile_path else None,
                     "train_examples": len(examples),
                     "contaminated_dropped": splits.contaminated_dropped,
+                    "grading_fingerprint": grading_fp,
+                    "task_spec": cfg.task.spec,
                 },
             )
 
-    task = get_task(cfg.task.name)
     system_prompt = task.system_prompt(cfg.task.system_prompt)
     train_ds = datasets.Dataset.from_list([e.to_row(system_prompt) for e in examples])
 
-    reward_funcs, _ = build_rewards(cfg)
+    reward_funcs, _ = build_rewards(cfg, task)
     try:
         args = GRPOConfig(**grpo_config_kwargs(cfg, ckpt_dir))
     except TypeError as e:  # unknown/removed field -> pin drift

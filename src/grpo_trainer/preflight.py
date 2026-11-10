@@ -105,7 +105,7 @@ def estimate_memory(
     else:
         trainable, opt_bytes = num_params * 0.01 * (a.r / 16), 16.0
     shard = cfg.hardware.num_processes if a.mode == "none" and cfg.hardware.num_processes > 1 else 1  # ZeRO-3
-    seq = TYPICAL_PROMPT_TOKENS + cfg.grpo.max_completion_length
+    seq = (cfg.task.typical_prompt_tokens or TYPICAL_PROMPT_TOKENS) + cfg.grpo.max_completion_length
     acts = cfg.grpo.per_device_train_batch_size * seq * vocab_size * 4 * 2
     vllm = (
         cfg.vllm.gpu_memory_utilization * vram_gb * GiB

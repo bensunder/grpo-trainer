@@ -54,6 +54,11 @@ class TaskConfig(_Strict):
     train_limit: int | None = Field(default=None, ge=1)
     eval_limit: int | None = Field(default=None, ge=1)
     system_prompt: str | None = None  # None -> task default (states the output contract)
+    # Task definition file. Required by `extraction` (fields, matchers, data paths); invalid elsewhere.
+    spec: str | None = None
+    # Typical prompt length for the memory estimate. None -> a short-question default (GSM8K-sized).
+    # Document tasks must set this; a 1.5k-token invoice is 4x the default.
+    typical_prompt_tokens: int | None = Field(default=None, ge=16)
 
 
 class RewardSpec(_Strict):
@@ -123,6 +128,12 @@ class ProfilerConfig(_Strict):
     keep_min_pass_rate: float = Field(default=0.0, ge=0.0, le=1.0)  # exclusive
     keep_max_pass_rate: float = Field(default=1.0, ge=0.0, le=1.0)  # exclusive
     gpu_memory_utilization: float = Field(default=0.85, gt=0.0, lt=1.0)
+    # pass_rate: keep prompts solved fully on some but not all samples (binary correctness).
+    # reward_variance: keep prompts whose correctness scores vary across samples. Use this for
+    # partial-credit rewards (field-level extraction): a prompt never fully solved still has gradient
+    # if its samples get different partial scores.
+    select: Literal["pass_rate", "reward_variance"] = "pass_rate"
+    min_score_std: float = Field(default=0.0, ge=0.0)  # exclusive; reward_variance only
 
     @model_validator(mode="after")
     def _band(self) -> ProfilerConfig:
@@ -152,6 +163,80 @@ class EvalConfig(_Strict):
     gate: GateConfig = Field(default_factory=GateConfig)
 
 
+class BaselineProvider(_Strict):
+    """A frontier model the customer uses today, run on the same held-out split for comparison.
+
+    Prices are per million tokens and must be set from the provider's current price sheet: they change
+    and are never hard-coded here. The API key is read from `api_key_env` at run time, never stored.
+    """
+
+    name: str = Field(min_length=1, pattern=r"^[A-Za-z0-9._-]+$")
+    kind: Literal["openai", "azure_openai", "anthropic"]
+    model: str = Field(min_length=1)  # model id; for azure_openai, the deployment name
+    base_url: str | None = None  # default per kind; required for azure_openai
+    api_key_env: str = Field(min_length=1)
+    api_version: str | None = None  # azure_openai only (required there)
+    input_usd_per_mtok: float = Field(ge=0.0)
+    output_usd_per_mtok: float = Field(ge=0.0)
+    max_concurrency: int = Field(default=4, ge=1, le=64)
+    requests_per_minute: int = Field(default=60, ge=1)
+    timeout_s: float = Field(default=90.0, gt=0.0)
+    max_retries: int = Field(default=4, ge=0, le=10)
+    temperature: float = Field(default=0.0, ge=0.0)
+    max_tokens: int | None = Field(default=None, ge=16)  # None -> eval max completion length
+    # OpenAI-family only. Newer OpenAI models reject `max_tokens`; most compatible servers accept both.
+    max_tokens_param: Literal["max_tokens", "max_completion_tokens"] | None = None
+    extra_body: dict[str, Any] = Field(default_factory=dict)  # merged into the request body
+
+    @model_validator(mode="after")
+    def _kind_rules(self) -> BaselineProvider:
+        if self.kind == "azure_openai" and (not self.base_url or not self.api_version):
+            raise ValueError(
+                "azure_openai requires base_url (https://<resource>.openai.azure.com) and api_version"
+            )
+        if self.kind != "azure_openai" and self.api_version is not None:
+            raise ValueError("api_version applies to azure_openai only")
+        if self.kind == "anthropic" and self.max_tokens_param is not None:
+            raise ValueError("max_tokens_param applies to openai/azure_openai only")
+        reserved = {"model", "messages", "system", "max_tokens", "max_completion_tokens", "temperature"}
+        clash = reserved & set(self.extra_body)
+        if clash:
+            raise ValueError(f"extra_body may not override {sorted(clash)}; use the typed fields")
+        return self
+
+
+class BaselineConfig(_Strict):
+    providers: list[BaselineProvider] = Field(default_factory=list)
+    max_cost_usd: float = Field(default=25.0, gt=0.0)  # hard stop per provider run, worst-case estimate
+    max_error_rate: float = Field(default=0.02, ge=0.0, le=1.0)  # failed requests allowed in a report
+    circuit_breaker_failures: int = Field(default=5, ge=1)  # consecutive failures before aborting
+
+    @model_validator(mode="after")
+    def _unique(self) -> BaselineConfig:
+        names = [p.name for p in self.providers]
+        if len(names) != len(set(names)):
+            raise ValueError(f"duplicate baseline provider names: {names}")
+        return self
+
+
+class EconomicsConfig(_Strict):
+    """Inputs for the cost model in the proof report. Unset values -> that section is omitted."""
+
+    serving_gpu: str = "unspecified"  # label only, e.g. "RTX 4000 Ada (GridShare)"
+    gpu_hourly_usd: float | None = Field(default=None, gt=0.0)
+    replicas: int = Field(default=1, ge=1)
+    monthly_volume: int | None = Field(default=None, ge=1)  # documents (requests) per month
+    target_utilization: float = Field(default=0.6, gt=0.0, le=1.0)
+
+
+class ReportConfig(_Strict):
+    title: str | None = None
+    customer: str | None = None
+    # Worked examples (input excerpt + outputs) in the report. Default 0: inputs are customer data.
+    include_examples: int = Field(default=0, ge=0, le=20)
+    example_input_chars: int = Field(default=600, ge=50)
+
+
 class HardwareConfig(_Strict):
     profile: str = "unspecified"
     num_processes: int = Field(default=1, ge=1)  # training processes (excl. a dedicated vLLM server GPU)
@@ -171,6 +256,9 @@ class Config(_Strict):
     profiler: ProfilerConfig = Field(default_factory=ProfilerConfig)
     eval: EvalConfig = Field(default_factory=EvalConfig)
     hardware: HardwareConfig = Field(default_factory=HardwareConfig)
+    baseline: BaselineConfig = Field(default_factory=BaselineConfig)
+    economics: EconomicsConfig = Field(default_factory=EconomicsConfig)
+    report: ReportConfig = Field(default_factory=ReportConfig)
 
     @model_validator(mode="after")
     def _cross_field(self) -> Config:
@@ -195,6 +283,8 @@ class Config(_Strict):
                 f"shaping reward weights sum ({shaping_w}) must be < correctness weight ({correctness_w}); "
                 "otherwise a well-formatted wrong answer can outscore a correct one"
             )
+        if self.task.name == "extraction" and not self.task.spec:
+            raise ValueError("task 'extraction' requires task.spec (path to the extraction spec YAML)")
         if self.adapter.mode == "qlora" and self.model.dtype == "float32":
             raise ValueError("qlora requires bfloat16 or float16 compute dtype")
         v = self.vllm
@@ -236,9 +326,25 @@ class Config(_Strict):
             "save_total_limit",
         ):
             payload["grpo"].pop(key, None)
-        payload.pop("eval", None)
+        # Evaluation, benchmarking and reporting never change what training does.
+        for section in ("eval", "baseline", "economics", "report"):
+            payload.pop(section, None)
+        # Memory-estimate hint only.
+        payload["task"].pop("typical_prompt_tokens", None)
+        # Fields added after runs already existed: omitted at their defaults so those runs' fingerprints
+        # (and therefore resume) are unchanged. A non-default value changes semantics and is hashed.
+        for section, key, default in _FINGERPRINT_OMIT_IF_DEFAULT:
+            if payload[section].get(key) == default:
+                payload[section].pop(key, None)
         blob = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
         return hashlib.sha256(blob).hexdigest()[:16]
+
+
+_FINGERPRINT_OMIT_IF_DEFAULT: tuple[tuple[str, str, Any], ...] = (
+    ("task", "spec", None),
+    ("profiler", "select", "pass_rate"),
+    ("profiler", "min_score_std", 0.0),
+)
 
 
 # ---------------------------------------------------------------- loading

@@ -23,7 +23,7 @@ class Splits:
 
 
 def load_splits(cfg: Config, task: Task | None = None) -> Splits:
-    task = task or get_task(cfg.task.name)
+    task = task or get_task(cfg.task.name, spec=cfg.task.spec)
     held_out = task.load(cfg.task.eval_split, None)
     train_all = task.load(cfg.task.train_split, None)
     train, dropped = drop_contaminated(train_all, held_out)
@@ -55,8 +55,8 @@ def profile_cache_dir(cfg: Config) -> Path:
     return Path(cfg.run.output_root) / "_cache" / "profiles"
 
 
-def read_profile(path: Path) -> dict[str, float]:
-    rates: dict[str, float] = {}
+def _read_profile_field(path: Path, field: str) -> dict[str, float]:
+    values: dict[str, float] = {}
     with path.open(encoding="utf-8") as f:
         for line_no, line in enumerate(f, 1):
             line = line.strip()
@@ -64,24 +64,55 @@ def read_profile(path: Path) -> dict[str, float]:
                 continue
             try:
                 rec = json.loads(line)
-                rates[str(rec["id"])] = float(rec["pass_rate"])
-            except (json.JSONDecodeError, KeyError, TypeError, ValueError) as e:
+                values[str(rec["id"])] = float(rec[field])
+            except KeyError as e:
+                if field != "pass_rate":
+                    raise DataError(
+                        f"profile {path} has no {field!r} (written by an older version); "
+                        "re-run `grpo profile --force`"
+                    ) from e
                 raise DataError(f"corrupt profile {path} line {line_no}: {e}") from e
-    return rates
+            except (json.JSONDecodeError, TypeError, ValueError) as e:
+                raise DataError(f"corrupt profile {path} line {line_no}: {e}") from e
+    return values
 
 
-def select_learnable(cfg: Config, sample: list[Example], rates: dict[str, float]) -> list[Example]:
-    lo, hi = cfg.profiler.keep_min_pass_rate, cfg.profiler.keep_max_pass_rate
-    missing = [e.id for e in sample if e.id not in rates]
+def read_profile(path: Path) -> dict[str, float]:
+    """Per-prompt pass rate (fraction of samples scored exactly 1.0)."""
+    return _read_profile_field(path, "pass_rate")
+
+
+def read_profile_std(path: Path) -> dict[str, float]:
+    """Per-prompt standard deviation of the correctness score across samples."""
+    return _read_profile_field(path, "score_std")
+
+
+def select_learnable(
+    cfg: Config,
+    sample: list[Example],
+    rates: dict[str, float],
+    stds: dict[str, float] | None = None,
+) -> list[Example]:
+    p = cfg.profiler
+    source = stds if p.select == "reward_variance" else rates
+    if source is None:
+        raise DataError("profiler.select=reward_variance needs per-prompt score_std from the profile")
+    missing = [e.id for e in sample if e.id not in source]
     if missing:
         raise DataError(
             f"profile is missing {len(missing)} sampled prompts (first {missing[:3]}); re-run `grpo profile`"
         )
-    kept = [e for e in sample if lo < rates[e.id] < hi]
+    if p.select == "reward_variance":
+        kept = [e for e in sample if source[e.id] > p.min_score_std]
+        band = f"score_std > {p.min_score_std}"
+    else:
+        lo, hi = p.keep_min_pass_rate, p.keep_max_pass_rate
+        kept = [e for e in sample if lo < source[e.id] < hi]
+        band = f"pass rate in ({lo}, {hi})"
     if not kept:
         raise DataError(
-            f"no prompts in learnable band ({lo}, {hi}); the base model always/never solves this set. "
-            "Change model, task, or band."
+            f"no prompts in learnable band ({band}); every sampled prompt scores the same on all samples, "
+            "so GRPO has no gradient. Change model, task, or selection."
         )
     return kept
 
@@ -94,7 +125,8 @@ def training_examples(cfg: Config, splits: Splits, profile_path: Path | None) ->
             "profiler.enabled is true but no profile exists for this config; run `grpo profile` first"
         )
     sample = profiling_sample(cfg, splits.train)
-    kept = select_learnable(cfg, sample, read_profile(profile_path))
+    stds = read_profile_std(profile_path) if cfg.profiler.select == "reward_variance" else None
+    kept = select_learnable(cfg, sample, read_profile(profile_path), stds)
     needed = cfg.prompts_per_step * cfg.grpo.max_steps
     log.info(
         "training on %d/%d profiled prompts (%.0f%%); %d prompt-visits planned (~%.1f epochs)",

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import math
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import asdict, dataclass
 from typing import Any
 
@@ -15,9 +15,12 @@ COMPARABLE_KEYS = (
     "split",
     "num_examples",
     "dataset_fingerprint",
+    "grading_fingerprint",  # absent in older reports -> None on both sides -> still comparable
     "max_completion_length",
     "system_prompt_sha",
 )
+
+Judge = Callable[[str, str], bool]  # (output text, ground truth) -> correct
 
 
 def pass_at_k(n: int, c: int, k: int) -> float:
@@ -50,8 +53,22 @@ def mcnemar_exact(only_base: int, only_candidate: int) -> float:
     return min(1.0, 2 * tail)
 
 
+def paired_diff_ci(only_a: int, only_b: int, n: int, z: float = 1.959964) -> tuple[float, float]:
+    """Wald CI for the paired accuracy difference acc(b) - acc(a) on the same n questions.
+
+    d = (only_b - only_a) / n,  se = sqrt(only_a + only_b - (only_b - only_a)^2 / n) / n.
+    Adequate for reporting at n in the hundreds; the significance claim itself uses the exact test.
+    """
+    if n <= 0:
+        raise ValueError("n must be positive")
+    d = (only_b - only_a) / n
+    var = only_a + only_b - (only_b - only_a) ** 2 / n
+    se = math.sqrt(max(var, 0.0)) / n
+    return max(-1.0, d - z * se), min(1.0, d + z * se)
+
+
 @dataclass(frozen=True)
-class PairedLenient:
+class PairedResult:
     n: int
     base_accuracy: float
     candidate_accuracy: float
@@ -63,27 +80,28 @@ class PairedLenient:
     def delta(self) -> float:
         return self.candidate_accuracy - self.base_accuracy
 
+    @property
+    def ci95(self) -> tuple[float, float]:
+        return paired_diff_ci(self.only_base_correct, self.only_candidate_correct, self.n)
 
-def paired_lenient(base_rows: Iterable[dict[str, Any]], cand_rows: Iterable[dict[str, Any]]) -> PairedLenient:
-    """Re-score both models' saved outputs leniently and pair them by question id.
 
-    Recomputed from `output` + `ground_truth` rather than trusting a stored flag, so it also works on
-    reports written before lenient scoring existed.
-    """
+PairedLenient = PairedResult  # backward-compatible name
 
-    def index(rows: Iterable[dict[str, Any]], label: str) -> dict[str, bool]:
-        out: dict[str, bool] = {}
-        for r in rows:
-            try:
-                qid, text, gt = str(r["id"]), r.get("output") or "", r["ground_truth"]
-            except KeyError as e:
-                raise GateFailedError(f"{label} examples missing field {e}") from None
-            if qid in out:
-                raise GateFailedError(f"{label} examples contain duplicate id {qid!r}")
-            out[qid] = lenient_correct(text, str(gt))
-        return out
 
-    b, c = index(base_rows, "base"), index(cand_rows, "candidate")
+def index_rows(rows: Iterable[dict[str, Any]], label: str, judge: Judge) -> dict[str, bool]:
+    out: dict[str, bool] = {}
+    for r in rows:
+        try:
+            qid, text, gt = str(r["id"]), r.get("output") or "", r["ground_truth"]
+        except KeyError as e:
+            raise GateFailedError(f"{label} examples missing field {e}") from None
+        if qid in out:
+            raise GateFailedError(f"{label} examples contain duplicate id {qid!r}")
+        out[qid] = judge(text, str(gt))
+    return out
+
+
+def paired_from_index(b: dict[str, bool], c: dict[str, bool]) -> PairedResult:
     if set(b) != set(c):
         only = sorted(set(b) ^ set(c))[:5]
         raise GateFailedError(f"base and candidate were evaluated on different questions (e.g. {only})")
@@ -92,7 +110,7 @@ def paired_lenient(base_rows: Iterable[dict[str, Any]], cand_rows: Iterable[dict
     only_base = sum(b[q] and not c[q] for q in b)
     only_cand = sum(c[q] and not b[q] for q in b)
     n = len(b)
-    return PairedLenient(
+    return PairedResult(
         n=n,
         base_accuracy=sum(b.values()) / n,
         candidate_accuracy=sum(c.values()) / n,
@@ -100,6 +118,26 @@ def paired_lenient(base_rows: Iterable[dict[str, Any]], cand_rows: Iterable[dict
         only_candidate_correct=only_cand,
         p_value=mcnemar_exact(only_base, only_cand),
     )
+
+
+def paired_compare(
+    base_rows: Iterable[dict[str, Any]], cand_rows: Iterable[dict[str, Any]], judge: Judge
+) -> PairedResult:
+    """Re-score both models' saved outputs with `judge` and pair them by question id."""
+    return paired_from_index(index_rows(base_rows, "base", judge), index_rows(cand_rows, "candidate", judge))
+
+
+def paired_lenient(
+    base_rows: Iterable[dict[str, Any]],
+    cand_rows: Iterable[dict[str, Any]],
+    judge: Judge = lenient_correct,
+) -> PairedResult:
+    """Lenient (knowledge-only) paired comparison. Defaults to the numeric GSM8K judge.
+
+    Recomputed from `output` + `ground_truth` rather than trusting a stored flag, so it also works on
+    reports written before lenient scoring existed.
+    """
+    return paired_compare(base_rows, cand_rows, judge)
 
 
 @dataclass(frozen=True)
@@ -128,8 +166,12 @@ def evaluate_gate(
     gate: GateConfig,
     base_rows: Iterable[dict[str, Any]],
     cand_rows: Iterable[dict[str, Any]],
+    judge: Judge = lenient_correct,
 ) -> GateResult:
-    """Compare two eval reports (and their per-question outputs) produced by `grpo eval`."""
+    """Compare two eval reports (and their per-question outputs) produced by `grpo eval`.
+
+    `judge` is the task's lenient (knowledge-only) correctness; the numeric default is GSM8K's.
+    """
     for key in COMPARABLE_KEYS:
         if base.get(key) != candidate.get(key):
             raise GateFailedError(
@@ -137,7 +179,7 @@ def evaluate_gate(
             )
     acc_delta = float(candidate["greedy"]["accuracy"]) - float(base["greedy"]["accuracy"])
     fmt_delta = float(candidate["greedy"]["format_rate"]) - float(base["greedy"]["format_rate"])
-    lp = paired_lenient(base_rows, cand_rows)
+    lp = paired_lenient(base_rows, cand_rows, judge)
     if lp.n != int(base["num_examples"]):
         raise GateFailedError(f"examples file has {lp.n} rows but report says {base['num_examples']}")
     significant = lp.p_value <= gate.alpha and lp.only_candidate_correct > lp.only_base_correct
