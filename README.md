@@ -46,6 +46,19 @@ bash scripts/pipeline.sh $GRPO_PROFILE   # the real run
 
 Docker alternative: `docker build -t grpo-trainer .` (base image tag unverified; see below).
 
+## One-script update + run (GridShare)
+
+From your Mac, after downloading the newest `grpo-trainer.zip`:
+
+```bash
+bash ~/Downloads/mac_go.sh     # copy of scripts/mac_go.sh
+```
+
+Uploads the newest zip, updates the server code in place (`runs/` kept), re-gates the smoke results, and
+-- only if you answer `y` -- starts the full pipeline detached (`scripts/run_all.sh --full`), logging to
+`/workspace/pipeline-<timestamp>.log`. One password prompt (SSH connection sharing). For a different
+machine: `GRPO_PORT=... GRPO_ALIAS=gridshare-<id> bash ~/Downloads/mac_go.sh`.
+
 ## Commands
 
 | Command | What it does |
